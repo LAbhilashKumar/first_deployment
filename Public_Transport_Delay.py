@@ -466,7 +466,7 @@ def render_sidebar():
         if st.session_state.role == "admin":
             pages = ["Revenue Dashboard", "User Management"]
         else:
-            pages = ["Home", "Operational Dashboard", "Route Insights", "Insights", "My Profile", "Payments", "About Us"]
+            pages = ["My Profile", "Home", "Operational Dashboard", "Route Insights", "Insights", "Payments", "About Us"]
 
         page = st.radio("Navigation", pages, label_visibility="collapsed")
         st.divider()
