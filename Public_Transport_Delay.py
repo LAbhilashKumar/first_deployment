@@ -5,6 +5,8 @@ import plotly.graph_objects as go
 import json
 import hashlib
 import os
+import random
+import string
 from datetime import datetime
 
 # ======================================================
@@ -101,7 +103,7 @@ section[data-testid="stSidebar"]::before {
     content: "🚍 Public Transport Delay Analytics";
     display: block;
     padding: 22px 20px;
-    font-size: 28px;
+    font-size: 18px;
     font-weight: 700;
     color: white;
     border-bottom: 1px solid #312e81;
@@ -204,11 +206,33 @@ div[data-testid="stPlotlyChart"] {
     font-size: 14px;
     margin-bottom: 16px;
 }
-.rev-card {
+.payment-card {
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(139,92,246,0.3);
+    border-radius: 20px;
+    padding: 32px;
+    margin-bottom: 20px;
+}
+.payment-success {
+    background: rgba(34,197,94,0.1);
+    border: 1px solid rgba(34,197,94,0.4);
     border-radius: 16px;
-    padding: 22px 18px;
+    padding: 28px;
     text-align: center;
+    color: #86efac;
+    margin: 20px 0;
+}
+.txn-row {
+    background: rgba(255,255,255,0.03);
+    border: 1px solid rgba(139,92,246,0.15);
+    border-radius: 10px;
+    padding: 12px 18px;
     margin-bottom: 8px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 13px;
+    color: #d8b4fe;
 }
 .stButton > button {
     background: linear-gradient(135deg, #7c3aed, #8b5cf6);
@@ -284,16 +308,29 @@ def register_user(username, password, name, users):
         "role": "user",
         "name": name,
         "created_at": str(datetime.now()),
-        "plan": "Free"
+        "plan": "Free",
+        "transactions": []
     }
     save_users(users)
     return True, "Account created! You are on the Free plan."
+
+def generate_txn_id():
+    return "TXN" + "".join(random.choices(string.ascii_uppercase + string.digits, k=10))
 
 # ======================================================
 # SESSION STATE
 # ======================================================
 
-for key, val in [("logged_in", False), ("role", None), ("username", None), ("name", None), ("plan", "Free")]:
+for key, val in [
+    ("logged_in", False),
+    ("role", None),
+    ("username", None),
+    ("name", None),
+    ("plan", "Free"),
+    ("payment_step", "select"),      # select | details | confirm | success
+    ("payment_target_plan", None),
+    ("payment_method", None),
+]:
     if key not in st.session_state:
         st.session_state[key] = val
 
@@ -306,13 +343,11 @@ def plan_limits():
     return PLANS[get_plan()]
 
 # ======================================================
-# SUBSCRIPTION REVENUE CALCULATOR
+# SUBSCRIPTION REVENUE HELPER
 # ======================================================
 
 def get_subscription_revenue_data():
-    """Build subscription revenue data from users_db"""
     fresh = load_users()
-
     rows = []
     for username, data in fresh.items():
         if data["role"] == "user":
@@ -325,9 +360,8 @@ def get_subscription_revenue_data():
                 "monthly_revenue": PLANS[plan]["monthly_revenue"],
                 "joined": joined
             })
-
     return pd.DataFrame(rows) if rows else pd.DataFrame(
-        columns=["username","name","plan","monthly_revenue","joined"]
+        columns=["username", "name", "plan", "monthly_revenue", "joined"]
     )
 
 # ======================================================
@@ -432,13 +466,14 @@ def render_sidebar():
         if st.session_state.role == "admin":
             pages = ["Revenue Dashboard", "User Management"]
         else:
-            pages = ["Home", "Operational Dashboard", "Route Insights", "Insights", "My Profile", "About Us"]
+            pages = ["Home", "Operational Dashboard", "Route Insights", "Insights", "My Profile", "Payments", "About Us"]
 
         page = st.radio("Navigation", pages, label_visibility="collapsed")
         st.divider()
 
         if st.button("🚪 Logout"):
-            for k in ["logged_in","role","username","name","plan"]:
+            for k in ["logged_in", "role", "username", "name", "plan",
+                      "payment_step", "payment_target_plan", "payment_method"]:
                 st.session_state[k] = None
             st.session_state.logged_in = False
             st.rerun()
@@ -453,7 +488,7 @@ def lock_banner(feature, upgrade_to="Basic"):
     st.markdown(f"""
     <div class="lock-banner">
     🔒 <b>{feature}</b> is not available on your current plan.<br>
-    Upgrade to <b>{upgrade_to}</b> or higher from <b>My Profile → Subscription</b>.
+    Upgrade to <b>{upgrade_to}</b> or higher from <b>Payments</b> page.
     </div>
     """, unsafe_allow_html=True)
 
@@ -499,8 +534,13 @@ def page_home():
 # ======================================================
 
 def page_operational_dashboard():
-    trips  = pd.read_excel("data/Fact_Trips_Cleaned.xlsx")
-    routes = pd.read_excel("data/Dim_Routes_Cleaned.xlsx")
+    # Load data — wrapped in try/except so missing files don't crash the app
+    try:
+        trips  = pd.read_excel("data/Fact_Trips_Cleaned.xlsx")
+        routes = pd.read_excel("data/Dim_Routes_Cleaned.xlsx")
+    except FileNotFoundError as e:
+        st.error(f"Data file not found: {e}. Please ensure the `data/` folder contains the required Excel files.")
+        return
 
     trips["Delay_Minutes"]    = pd.to_numeric(trips["Delay_Minutes"], errors="coerce")
     trips["Hour"]             = pd.to_datetime(trips["Time"], errors="coerce").dt.hour
@@ -520,11 +560,34 @@ def page_operational_dashboard():
     allowed_routes = all_routes[:max_routes]
     df             = df[df["RouteID"].isin(allowed_routes)]
 
+    # FIX: Sidebar filters placed BEFORE the main content, not nested inside another with st.sidebar block
+    st.title("📊 Operational Transport Dashboard")
+    st.markdown("Monitor public transport performance, delay patterns, congestion levels, weather impact, and district-wise operations.")
+
+    if plan != "Premium":
+        st.info(f"📦 **{plan} Plan** — Showing **{len(allowed_routes)} of {len(all_routes)} routes** and **{max_charts} charts**. Upgrade for full access.")
+
+    # Sidebar filters
     with st.sidebar:
         st.subheader("🎛️ Filters")
-        vehicle_filter = st.multiselect("Vehicle Type",      sorted(df["VehicleType"].dropna().unique()),      default=sorted(df["VehicleType"].dropna().unique()))
-        weather_filter = st.multiselect("Weather Condition", sorted(df["WeatherCondition"].dropna().unique()), default=sorted(df["WeatherCondition"].dropna().unique()))
-        status_filter  = st.multiselect("Trip Status",       sorted(df["Status"].dropna().unique()),           default=sorted(df["Status"].dropna().unique()))
+        vehicle_filter = st.multiselect(
+            "Vehicle Type",
+            sorted(df["VehicleType"].dropna().unique()),
+            default=sorted(df["VehicleType"].dropna().unique()),
+            key="od_vehicle"
+        )
+        weather_filter = st.multiselect(
+            "Weather Condition",
+            sorted(df["WeatherCondition"].dropna().unique()),
+            default=sorted(df["WeatherCondition"].dropna().unique()),
+            key="od_weather"
+        )
+        status_filter = st.multiselect(
+            "Trip Status",
+            sorted(df["Status"].dropna().unique()),
+            default=sorted(df["Status"].dropna().unique()),
+            key="od_status"
+        )
 
     filtered_df = df[
         df["VehicleType"].isin(vehicle_filter) &
@@ -533,14 +596,8 @@ def page_operational_dashboard():
     ].copy()
 
     if filtered_df.empty:
-        st.warning("No data available.")
+        st.warning("No data available for the selected filters.")
         return
-
-    st.title("📊 Operational Transport Dashboard")
-    st.markdown("Monitor public transport performance, delay patterns, congestion levels, weather impact, and district-wise operations.")
-
-    if plan != "Premium":
-        st.info(f"📦 **{plan} Plan** — Showing **{len(allowed_routes)} of {len(all_routes)} routes** and **{max_charts} charts**. Upgrade for full access.")
 
     st.divider()
 
@@ -561,31 +618,40 @@ def page_operational_dashboard():
     congestion_delay = filtered_df.groupby("CongestionLevel")["Delay_Minutes"].mean().reset_index()
     filtered_df["Day"] = pd.to_datetime(filtered_df["Date"], errors="coerce").dt.day_name()
     heatmap_data     = filtered_df.pivot_table(values="Delay_Minutes", index="Day", columns="Hour", aggfunc="mean")
-    district_data    = filtered_df.groupby(["Origin","Destination","Status","VehicleType"]).size().reset_index(name="Trips")
+    district_data    = filtered_df.groupby(["Origin", "Destination", "Status", "VehicleType"]).size().reset_index(name="Trips")
 
     fig_line = px.line(hourly_delay, x="Hour", y="Delay_Minutes", markers=True, title="⏰ Hourly Delay Trend")
     fig_line.update_traces(line=dict(color="#06b6d4", width=3), marker=dict(color="#67e8f9", size=8))
 
     fig_weather = px.bar(weather_delay, x="WeatherCondition", y="Delay_Minutes", title="🌦️ Weather Impact")
-    fig_weather.update_traces(marker_color=["#2563eb","#3b82f6","#60a5fa","#93c5fd","#2563eb"])
+    fig_weather.update_traces(marker_color=["#2563eb", "#3b82f6", "#60a5fa", "#93c5fd", "#2563eb"][:len(weather_delay)])
 
     fig_vehicle = px.bar(vehicle_data, x="VehicleType", y="Trips", title="🚍 Vehicle Distribution")
-    fig_vehicle.update_traces(marker_color=["#059669","#10b981"])
+    fig_vehicle.update_traces(marker_color=["#059669", "#10b981"][:len(vehicle_data)])
 
     fig_bar = px.bar(route_delay.head(10), x="RouteID", y="Delay_Minutes", title="🚦 Top Delayed Routes")
-    fig_bar.update_traces(marker_color=["#dc2626","#ef4444","#f87171","#fca5a5","#dc2626","#ef4444","#f87171","#fca5a5","#dc2626","#ef4444"])
+    colors_bar = ["#dc2626", "#ef4444", "#f87171", "#fca5a5"] * 3
+    fig_bar.update_traces(marker_color=colors_bar[:len(route_delay.head(10))])
 
     fig_congestion = px.bar(congestion_delay, x="CongestionLevel", y="Delay_Minutes",
                              title="🚗 Avg Delay by Congestion Level", text_auto=".1f")
-    fig_congestion.update_traces(marker_color=["#22c55e","#facc15","#ef4444"], textposition="outside")
+    congestion_colors = ["#22c55e", "#facc15", "#ef4444"]
+    fig_congestion.update_traces(
+        marker_color=congestion_colors[:len(congestion_delay)],
+        textposition="outside"
+    )
 
-    fig_heatmap = px.imshow(heatmap_data, text_auto=True, aspect="auto",
-                             title="🔥 Delay Heatmap", color_continuous_scale="Turbo")
+    fig_heatmap = px.imshow(
+        heatmap_data, text_auto=True, aspect="auto",
+        title="🔥 Delay Heatmap", color_continuous_scale="Turbo"
+    )
 
-    fig_map = px.scatter(district_data, x="Origin", y="Destination", size="Trips",
-                         color="Status", symbol="VehicleType",
-                         title="🗺️ District-wise Delay & Vehicle Analysis",
-                         color_discrete_map={"On-Time":"#38bdf8","Delayed":"#818cf8","Cancelled":"#c084fc"})
+    fig_map = px.scatter(
+        district_data, x="Origin", y="Destination", size="Trips",
+        color="Status", symbol="VehicleType",
+        title="🗺️ District-wise Delay & Vehicle Analysis",
+        color_discrete_map={"On-Time": "#38bdf8", "Delayed": "#818cf8", "Cancelled": "#c084fc"}
+    )
 
     all_figs = [fig_line, fig_weather, fig_vehicle, fig_bar, fig_congestion, fig_heatmap, fig_map]
     for fig in all_figs:
@@ -642,12 +708,14 @@ def page_route_insights():
         lock_banner("Route Insights Dashboard", "Basic")
         return
 
+    # FIX: Safely check for Groq availability without crashing
+    groq_ok = False
     try:
         from groq import Groq
-        api_key = st.secrets["API_KEY"]
-        groq_ok = True
+        if "API_KEY" in st.secrets:
+            groq_ok = True
     except Exception:
-        groq_ok = False
+        pass
 
     @st.cache_data
     def load_data():
@@ -655,7 +723,12 @@ def page_route_insights():
         routes = pd.read_excel("data/Dim_Routes_Cleaned.xlsx")
         return trips, routes
 
-    trips, routes = load_data()
+    try:
+        trips, routes = load_data()
+    except FileNotFoundError as e:
+        st.error(f"Data file not found: {e}")
+        return
+
     df = trips.merge(routes, on="RouteID", how="left") if "RouteID" in routes.columns else trips.copy()
 
     df["Delay_Minutes"] = pd.to_numeric(df["Delay_Minutes"], errors="coerce")
@@ -664,23 +737,24 @@ def page_route_insights():
     df["Month"]         = df["Date"].dt.month
 
     def get_season(m):
-        if m in [3,4,5]:      return "Summer"
-        elif m in [6,7,8,9]:  return "Monsoon"
-        elif m in [10,11]:    return "Post-Monsoon"
-        else:                 return "Winter"
+        if m in [3, 4, 5]:      return "Summer"
+        elif m in [6, 7, 8, 9]: return "Monsoon"
+        elif m in [10, 11]:     return "Post-Monsoon"
+        else:                   return "Winter"
 
     def get_tp(h):
-        if pd.isna(h):       return "Unknown"
-        elif 6  <= h < 10:   return "Morning Rush"
-        elif 10 <= h < 16:   return "Afternoon"
-        elif 16 <= h < 21:   return "Evening Rush"
-        else:                return "Night"
+        if pd.isna(h):      return "Unknown"
+        elif 6  <= h < 10:  return "Morning Rush"
+        elif 10 <= h < 16:  return "Afternoon"
+        elif 16 <= h < 21:  return "Evening Rush"
+        else:               return "Night"
 
     df["Season"]     = df["Month"].apply(get_season)
     df["TimePeriod"] = df["Hour"].apply(get_tp)
 
-    for col in ["VehicleType","Status","WeatherCondition","CongestionLevel"]:
-        df[col] = df[col].astype(str).str.strip()
+    for col in ["VehicleType", "Status", "WeatherCondition", "CongestionLevel"]:
+        if col in df.columns:
+            df[col] = df[col].astype(str).str.strip()
 
     max_routes = limits["routes"]
     all_routes = sorted(df["RouteID"].dropna().unique())
@@ -688,18 +762,22 @@ def page_route_insights():
 
     with st.sidebar:
         st.subheader("🎛️ Filters")
-        route_filter   = st.selectbox("Select Route", ["All"] + list(allowed))
-        vehicle_filter = st.multiselect("Vehicle Type",      sorted(df["VehicleType"].dropna().unique()), default=sorted(df["VehicleType"].dropna().unique()))
-        status_filter  = st.multiselect("Trip Status",       sorted(df["Status"].dropna().unique()),      default=sorted(df["Status"].dropna().unique()))
-        weather_filter = st.multiselect("Weather Condition", sorted(df["WeatherCondition"].dropna().unique()), default=sorted(df["WeatherCondition"].dropna().unique()))
+        route_filter   = st.selectbox("Select Route", ["All"] + list(allowed), key="ri_route")
+        vehicle_filter = st.multiselect("Vehicle Type",      sorted(df["VehicleType"].dropna().unique()), default=sorted(df["VehicleType"].dropna().unique()), key="ri_vehicle")
+        status_filter  = st.multiselect("Trip Status",       sorted(df["Status"].dropna().unique()),      default=sorted(df["Status"].dropna().unique()), key="ri_status")
+        weather_filter = st.multiselect("Weather Condition", sorted(df["WeatherCondition"].dropna().unique()), default=sorted(df["WeatherCondition"].dropna().unique()), key="ri_weather")
 
     filt = df[df["RouteID"].isin(allowed)]
     if route_filter != "All":
         filt = filt[filt["RouteID"] == route_filter]
-    filt = filt[filt["VehicleType"].isin(vehicle_filter) & filt["Status"].isin(status_filter) & filt["WeatherCondition"].isin(weather_filter)]
+    filt = filt[
+        filt["VehicleType"].isin(vehicle_filter) &
+        filt["Status"].isin(status_filter) &
+        filt["WeatherCondition"].isin(weather_filter)
+    ]
 
     if filt.empty:
-        st.warning("No data available.")
+        st.warning("No data available for the selected filters.")
         return
 
     route_label = "All Routes" if route_filter == "All" else f"Route {route_filter}"
@@ -718,9 +796,9 @@ def page_route_insights():
     else:
         ri = filt.iloc[0]
         i1, i2, i3, i4 = st.columns(4)
-        i1.info(f"**Origin**\n\n{ri.get('Origin','N/A')}")
-        i2.info(f"**Destination**\n\n{ri.get('Destination','N/A')}")
-        i3.info(f"**Distance**\n\n{ri.get('DistanceKM','N/A')} KM")
+        i1.info(f"**Origin**\n\n{ri.get('Origin', 'N/A')}")
+        i2.info(f"**Destination**\n\n{ri.get('Destination', 'N/A')}")
+        i3.info(f"**Distance**\n\n{ri.get('DistanceKM', 'N/A')} KM")
         i4.info(f"**Vehicle Types**\n\n{', '.join(vehicle_filter)}")
 
     st.divider()
@@ -728,21 +806,27 @@ def page_route_insights():
     k1.metric("Average Delay", f"{filt['Delay_Minutes'].mean():.1f} mins")
     k2.metric("Maximum Delay", f"{filt['Delay_Minutes'].max():.1f} mins")
     k3.metric("Trips",         len(filt))
-    k4.metric("On-Time %",     f"{(filt['Status']=='On-Time').sum()/len(filt)*100:.1f}%")
+    otp_pct = (filt["Status"] == "On-Time").sum() / len(filt) * 100 if len(filt) > 0 else 0
+    k4.metric("On-Time %",     f"{otp_pct:.1f}%")
     st.divider()
 
     wi = filt.groupby("WeatherCondition").agg(A=("Delay_Minutes","mean"), T=("Delay_Minutes","count"))
-    wi["S"] = wi["A"] * wi["T"]; top_wx = wi["S"].idxmax()
+    wi["S"] = wi["A"] * wi["T"]
+    top_wx = wi["S"].idxmax() if not wi.empty else "N/A"
+
     ci = filt.groupby("CongestionLevel").agg(A=("Delay_Minutes","mean"), T=("Delay_Minutes","count"))
-    ci["S"] = ci["A"] * ci["T"]; top_cg = ci["S"].idxmax()
+    ci["S"] = ci["A"] * ci["T"]
+    top_cg = ci["S"].idxmax() if not ci.empty else "N/A"
+
     ti = filt.groupby("TimePeriod").agg(A=("Delay_Minutes","mean"), T=("Delay_Minutes","count"))
-    ti["S"] = ti["A"] * ti["T"]; top_tp = ti["S"].idxmax()
+    ti["S"] = ti["A"] * ti["T"]
+    top_tp = ti["S"].idxmax() if not ti.empty else "N/A"
 
     st.subheader("🚨 Root Cause Analysis")
     st.markdown(f"""
     <div class="insight-box">
     🌦️ Major delays strongly associated with <b>{top_wx}</b> weather.<br><br>
-    🚦 Route instability severe during <b>{top_cg.lower()}</b> congestion.<br><br>
+    🚦 Route instability severe during <b>{str(top_cg).lower()}</b> congestion.<br><br>
     ⏰ Most disruptions occur during <b>{top_tp}</b>.
     </div>""", unsafe_allow_html=True)
     st.divider()
@@ -751,62 +835,107 @@ def page_route_insights():
         items = "".join(f"<li>{p}</li>" for p in pts)
         st.markdown(f'<div class="chart-summary"><ul>{items}</ul></div>', unsafe_allow_html=True)
 
-    time_order = ["Morning Rush","Afternoon","Evening Rush","Night"]
+    time_order = ["Morning Rush", "Afternoon", "Evening Rush", "Night"]
 
-    seas_df = filt.groupby(["Season","WeatherCondition"]).agg(AvgDelay=("Delay_Minutes","mean"), Trips=("Delay_Minutes","count")).reset_index()
+    seas_df = filt.groupby(["Season","WeatherCondition"]).agg(
+        AvgDelay=("Delay_Minutes","mean"), Trips=("Delay_Minutes","count")
+    ).reset_index()
     seas_df = seas_df[seas_df["Trips"] >= 15]
     seas_df["ImpactScore"] = seas_df["AvgDelay"] * seas_df["Trips"]
 
-    cong_df = filt.groupby(["TimePeriod","CongestionLevel"]).agg(AvgDelay=("Delay_Minutes","mean"), Trips=("Delay_Minutes","count")).reset_index()
+    cong_df = filt.groupby(["TimePeriod","CongestionLevel"]).agg(
+        AvgDelay=("Delay_Minutes","mean"), Trips=("Delay_Minutes","count")
+    ).reset_index()
     cong_df["ImpactScore"] = cong_df["AvgDelay"] * cong_df["Trips"]
-    top_cong_df = cong_df.loc[cong_df.groupby("TimePeriod")["ImpactScore"].idxmax()].copy()
-    top_cong_df["TimePeriod"] = pd.Categorical(top_cong_df["TimePeriod"], categories=time_order, ordered=True)
-    top_cong_df = top_cong_df.sort_values("TimePeriod")
-    top_cong_df["Reason"] = top_cong_df["CongestionLevel"] + " congestion caused " + top_cong_df["AvgDelay"].round(1).astype(str) + " mins"
+
+    top_cong_df = pd.DataFrame()
+    if not cong_df.empty:
+        top_cong_df = cong_df.loc[cong_df.groupby("TimePeriod")["ImpactScore"].idxmax()].copy()
+        top_cong_df["TimePeriod"] = pd.Categorical(top_cong_df["TimePeriod"], categories=time_order, ordered=True)
+        top_cong_df = top_cong_df.sort_values("TimePeriod")
+        top_cong_df["Reason"] = (
+            top_cong_df["CongestionLevel"] + " congestion caused " +
+            top_cong_df["AvgDelay"].round(1).astype(str) + " mins"
+        )
 
     sc_df = filt.groupby(["WeatherCondition","TimePeriod"])["Delay_Minutes"].mean().reset_index()
     sc_df.columns = ["WeatherCondition","TimePeriod","AvgDelay"]
-    sc_df["TimePeriod"] = pd.Categorical(sc_df["TimePeriod"], categories=time_order, ordered=True)
-    sc_df = sc_df.sort_values("TimePeriod")
+    if not sc_df.empty:
+        sc_df["TimePeriod"] = pd.Categorical(sc_df["TimePeriod"], categories=time_order, ordered=True)
+        sc_df = sc_df.sort_values("TimePeriod")
 
     hour_df = filt.groupby(["Hour","CongestionLevel"])["Delay_Minutes"].mean().reset_index()
 
-    fig_s  = px.bar(seas_df, x="Season", y="ImpactScore", color="WeatherCondition", barmode="group", title=f"🌦️ Seasonal Delay Causes — {route_label}")
-    fig_c  = px.bar(top_cong_df, x="TimePeriod", y="ImpactScore", color="CongestionLevel", text="Reason", title=f"🚦 Congestion Cause Across Day — {route_label}")
-    fig_c.update_traces(textposition="outside")
+    fig_s = px.bar(seas_df, x="Season", y="ImpactScore", color="WeatherCondition", barmode="group",
+                   title=f"🌦️ Seasonal Delay Causes — {route_label}")
+    fig_c = px.bar(top_cong_df, x="TimePeriod", y="ImpactScore", color="CongestionLevel",
+                   text="Reason", title=f"🚦 Congestion Cause Across Day — {route_label}")
+    if not top_cong_df.empty:
+        fig_c.update_traces(textposition="outside")
     fig_sc = px.bar(sc_df, x="TimePeriod", y="AvgDelay", color="WeatherCondition", barmode="group",
-                    text=sc_df["AvgDelay"].round(1).astype(str) + " m", title=f"🔥 Weather vs Time Period — {route_label}")
-    fig_sc.update_traces(textposition="outside", opacity=0.85)
-    fig_h  = px.line(hour_df, x="Hour", y="Delay_Minutes", color="CongestionLevel", markers=True, title=f"⏰ Hour-wise Instability — {route_label}")
+                    text=sc_df["AvgDelay"].round(1).astype(str) + " m",
+                    title=f"🔥 Weather vs Time Period — {route_label}")
+    if not sc_df.empty:
+        fig_sc.update_traces(textposition="outside", opacity=0.85)
+    fig_h = px.line(hour_df, x="Hour", y="Delay_Minutes", color="CongestionLevel", markers=True,
+                    title=f"⏰ Hour-wise Instability — {route_label}")
 
+    chart_bg = dict(height=360, paper_bgcolor="#111827", plot_bgcolor="#111827",
+                    font_color="white", margin=dict(l=10, r=10, t=50, b=10))
     for fig in [fig_s, fig_c, fig_sc, fig_h]:
-        fig.update_layout(height=360, paper_bgcolor="#111827", plot_bgcolor="#111827",
-                          font_color="white", margin=dict(l=10,r=10,t=50,b=10))
+        fig.update_layout(**chart_bg)
 
-    ss = ([f"<b>{seas_df.loc[seas_df['ImpactScore'].idxmax(),'Season']}</b> most delay-prone.",
-           f"<b>{seas_df.loc[seas_df['ImpactScore'].idxmin(),'Season']}</b> lowest delay."]
-          if not seas_df.empty else ["Insufficient seasonal data.","Adjust filters."])
+    # Summary bullets — guard against empty data
+    if not seas_df.empty:
+        ss = [
+            f"<b>{seas_df.loc[seas_df['ImpactScore'].idxmax(), 'Season']}</b> most delay-prone.",
+            f"<b>{seas_df.loc[seas_df['ImpactScore'].idxmin(), 'Season']}</b> lowest delay."
+        ]
+    else:
+        ss = ["Insufficient seasonal data.", "Adjust filters."]
 
-    hi = top_cong_df.loc[top_cong_df["ImpactScore"].idxmax()]
-    lo = top_cong_df.loc[top_cong_df["ImpactScore"].idxmin()]
-    cg = [f"<b>{hi['TimePeriod']}</b> highest — {hi['CongestionLevel'].lower()} congestion ({hi['AvgDelay']:.1f} mins).",
-          f"<b>{lo['TimePeriod']}</b> least affected — {lo['CongestionLevel'].lower()} congestion ({lo['AvgDelay']:.1f} mins)."]
+    if not top_cong_df.empty:
+        hi = top_cong_df.loc[top_cong_df["ImpactScore"].idxmax()]
+        lo = top_cong_df.loc[top_cong_df["ImpactScore"].idxmin()]
+        cg = [
+            f"<b>{hi['TimePeriod']}</b> highest — {str(hi['CongestionLevel']).lower()} congestion ({hi['AvgDelay']:.1f} mins).",
+            f"<b>{lo['TimePeriod']}</b> least affected — {str(lo['CongestionLevel']).lower()} congestion ({lo['AvgDelay']:.1f} mins)."
+        ]
+    else:
+        cg = ["Insufficient congestion data.", "Adjust filters."]
 
-    sc = ([f"Worst: <b>{sc_df.loc[sc_df['AvgDelay'].idxmax(),'WeatherCondition']}</b> at <b>{sc_df.loc[sc_df['AvgDelay'].idxmax(),'TimePeriod']}</b>.",
-           f"Best: <b>{sc_df.loc[sc_df['AvgDelay'].idxmin(),'WeatherCondition']}</b> at <b>{sc_df.loc[sc_df['AvgDelay'].idxmin(),'TimePeriod']}</b>."]
-          if not sc_df.empty else ["Insufficient data.","Adjust filters."])
+    if not sc_df.empty:
+        sc = [
+            f"Worst: <b>{sc_df.loc[sc_df['AvgDelay'].idxmax(), 'WeatherCondition']}</b> at <b>{sc_df.loc[sc_df['AvgDelay'].idxmax(), 'TimePeriod']}</b>.",
+            f"Best: <b>{sc_df.loc[sc_df['AvgDelay'].idxmin(), 'WeatherCondition']}</b> at <b>{sc_df.loc[sc_df['AvgDelay'].idxmin(), 'TimePeriod']}</b>."
+        ]
+    else:
+        sc = ["Insufficient data.", "Adjust filters."]
 
-    pk = hour_df.loc[hour_df["Delay_Minutes"].idxmax()]
-    lw = hour_df.loc[hour_df["Delay_Minutes"].idxmin()]
-    hr = [f"Peak at <b>{int(pk['Hour'])}:00</b> — {pk['CongestionLevel'].lower()} congestion ({pk['Delay_Minutes']:.1f} mins).",
-          f"Stable at <b>{int(lw['Hour'])}:00</b> — {lw['CongestionLevel'].lower()} congestion ({lw['Delay_Minutes']:.1f} mins)."]
+    if not hour_df.empty:
+        pk = hour_df.loc[hour_df["Delay_Minutes"].idxmax()]
+        lw = hour_df.loc[hour_df["Delay_Minutes"].idxmin()]
+        hr = [
+            f"Peak at <b>{int(pk['Hour'])}:00</b> — {str(pk['CongestionLevel']).lower()} congestion ({pk['Delay_Minutes']:.1f} mins).",
+            f"Stable at <b>{int(lw['Hour'])}:00</b> — {str(lw['CongestionLevel']).lower()} congestion ({lw['Delay_Minutes']:.1f} mins)."
+        ]
+    else:
+        hr = ["Insufficient hourly data.", "Adjust filters."]
 
     r1c1, r1c2 = st.columns(2)
-    with r1c1: st.plotly_chart(fig_s,  use_container_width=True); summary_box(ss)
-    with r1c2: st.plotly_chart(fig_c,  use_container_width=True); summary_box(cg)
+    with r1c1:
+        st.plotly_chart(fig_s,  use_container_width=True)
+        summary_box(ss)
+    with r1c2:
+        st.plotly_chart(fig_c,  use_container_width=True)
+        summary_box(cg)
     r2c1, r2c2 = st.columns(2)
-    with r2c1: st.plotly_chart(fig_sc, use_container_width=True); summary_box(sc)
-    with r2c2: st.plotly_chart(fig_h,  use_container_width=True); summary_box(hr)
+    with r2c1:
+        st.plotly_chart(fig_sc, use_container_width=True)
+        summary_box(sc)
+    with r2c2:
+        st.plotly_chart(fig_h,  use_container_width=True)
+        summary_box(hr)
 
     st.divider()
     st.header("🤖 AI Operational Assistant")
@@ -817,23 +946,33 @@ def page_route_insights():
     else:
         if ai_limit < 9999:
             st.caption(f"📦 Your plan allows **{ai_limit} AI queries/day**.")
-        user_q = st.text_area("Ask anything about delays, congestion, timings, or route performance",
-                              placeholder="e.g. When is congestion highest? How can delays be reduced?", height=150)
+        user_q = st.text_area(
+            "Ask anything about delays, congestion, timings, or route performance",
+            placeholder="e.g. When is congestion highest? How can delays be reduced?",
+            height=150
+        )
         if st.button("Ask AI"):
             if not user_q.strip():
                 st.warning("Please enter a question.")
             elif not groq_ok:
-                st.info("💡 Add Groq API key in `.streamlit/secrets.toml` to enable AI.")
+                st.info("💡 Add your Groq API key in `.streamlit/secrets.toml` as `API_KEY` to enable AI.")
             else:
                 with st.spinner("Analyzing..."):
                     from groq import Groq
                     gc = Groq(api_key=st.secrets["API_KEY"])
-                    ctx = f"Route: {route_label} | Avg: {filt['Delay_Minutes'].mean():.2f} | Max: {filt['Delay_Minutes'].max():.2f} | Trips: {len(filt)} | Worst weather: {top_wx} | Peak: {top_tp}\nQ: {user_q}\nAnswer concisely."
+                    ctx = (
+                        f"Route: {route_label} | Avg: {filt['Delay_Minutes'].mean():.2f} | "
+                        f"Max: {filt['Delay_Minutes'].max():.2f} | Trips: {len(filt)} | "
+                        f"Worst weather: {top_wx} | Peak: {top_tp}\nQ: {user_q}\nAnswer concisely."
+                    )
                     res = gc.chat.completions.create(
                         model="llama-3.3-70b-versatile",
-                        messages=[{"role":"system","content":"You are an AI transport operations analyst."},
-                                  {"role":"user","content":ctx}],
-                        temperature=0.3, max_tokens=400
+                        messages=[
+                            {"role": "system", "content": "You are an AI transport operations analyst."},
+                            {"role": "user",   "content": ctx}
+                        ],
+                        temperature=0.3,
+                        max_tokens=400
                     )
                     st.markdown(f'<div class="insight-box">{res.choices[0].message.content}</div>', unsafe_allow_html=True)
 
@@ -857,11 +996,17 @@ def page_insights():
         routes = pd.read_excel("data/Dim_Routes_Cleaned.xlsx")
         return trips, routes
 
-    trips, routes = load_data()
+    try:
+        trips, routes = load_data()
+    except FileNotFoundError as e:
+        st.error(f"Data file not found: {e}")
+        return
+
     df = trips.merge(routes, on="RouteID", how="left") if "RouteID" in routes.columns else trips.copy()
 
-    for col in ["VehicleType","Status","WeatherCondition","CongestionLevel"]:
-        if col in df.columns: df[col] = df[col].astype(str).str.strip()
+    for col in ["VehicleType", "Status", "WeatherCondition", "CongestionLevel"]:
+        if col in df.columns:
+            df[col] = df[col].astype(str).str.strip()
 
     df["Delay_Minutes"] = pd.to_numeric(df["Delay_Minutes"], errors="coerce")
     df["Hour"]          = pd.to_datetime(df["Time"], errors="coerce").dt.hour
@@ -869,16 +1014,21 @@ def page_insights():
     with st.sidebar:
         st.subheader("🎛️ Filters")
         route_options  = ["ALL"] + sorted(df["RouteID"].dropna().unique().tolist())
-        route_filter   = st.selectbox("Select Route", route_options)
-        vehicle_filter = st.multiselect("Vehicle Type",      sorted(df["VehicleType"].dropna().unique()), default=sorted(df["VehicleType"].dropna().unique()))
-        status_filter  = st.multiselect("Trip Status",       sorted(df["Status"].dropna().unique()),      default=sorted(df["Status"].dropna().unique()))
-        weather_filter = st.multiselect("Weather Condition", sorted(df["WeatherCondition"].dropna().unique()), default=sorted(df["WeatherCondition"].dropna().unique()))
+        route_filter   = st.selectbox("Select Route",     route_options, key="ins_route")
+        vehicle_filter = st.multiselect("Vehicle Type",   sorted(df["VehicleType"].dropna().unique()), default=sorted(df["VehicleType"].dropna().unique()), key="ins_vehicle")
+        status_filter  = st.multiselect("Trip Status",    sorted(df["Status"].dropna().unique()),      default=sorted(df["Status"].dropna().unique()), key="ins_status")
+        weather_filter = st.multiselect("Weather Condition", sorted(df["WeatherCondition"].dropna().unique()), default=sorted(df["WeatherCondition"].dropna().unique()), key="ins_weather")
 
     rm  = df["RouteID"].isin(df["RouteID"].unique()) if route_filter == "ALL" else (df["RouteID"] == route_filter)
-    fdf = df[rm & df["VehicleType"].isin(vehicle_filter) & df["Status"].isin(status_filter) & df["WeatherCondition"].isin(weather_filter)].copy()
+    fdf = df[
+        rm &
+        df["VehicleType"].isin(vehicle_filter) &
+        df["Status"].isin(status_filter) &
+        df["WeatherCondition"].isin(weather_filter)
+    ].copy()
 
     if fdf.empty:
-        st.warning("No data available.")
+        st.warning("No data available for the selected filters.")
         return
 
     st.title("📌 Insights")
@@ -886,73 +1036,340 @@ def page_insights():
     st.divider()
 
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Total Trips",        len(fdf))
-    m2.metric("Total Routes",       fdf["RouteID"].nunique())
-    m3.metric("Average Delay",      f"{fdf['Delay_Minutes'].mean():.2f} mins")
-    m4.metric("On-Time Performance",f"{(fdf['Status']=='On-Time').sum()/len(fdf)*100:.1f}%")
+    m1.metric("Total Trips",         len(fdf))
+    m2.metric("Total Routes",        fdf["RouteID"].nunique())
+    m3.metric("Average Delay",       f"{fdf['Delay_Minutes'].mean():.2f} mins")
+    m4.metric("On-Time Performance", f"{(fdf['Status']=='On-Time').sum() / len(fdf) * 100:.1f}%")
     st.divider()
 
     rl  = "All Routes" if route_filter == "ALL" else f"Route {route_filter}"
-    ad  = fdf["Delay_Minutes"].mean(); mx = fdf["Delay_Minutes"].max(); tc = len(fdf)
+    ad  = fdf["Delay_Minutes"].mean()
+    mx  = fdf["Delay_Minutes"].max()
+    tc  = len(fdf)
     otp = (fdf["Status"] == "On-Time").sum() / tc * 100
-    tc_ = fdf.groupby("CongestionLevel")["Delay_Minutes"].mean().idxmax() if "CongestionLevel" in fdf.columns else "N/A"
-    tcd = fdf.groupby("CongestionLevel")["Delay_Minutes"].mean().max()    if "CongestionLevel" in fdf.columns else 0
 
-    ops = [f"<b>{rl}</b> — <b>{tc}</b> trips, avg delay <b>{ad:.1f} mins</b>, OTP <b>{otp:.1f}%</b>.",
-           f"Highest single-trip delay: <b>{mx:.1f} mins</b>.",
-           f"<b>{tc_.lower()} congestion</b> is the leading pressure — <b>{tcd:.1f} mins</b> avg."]
+    tc_ = fdf.groupby("CongestionLevel")["Delay_Minutes"].mean().idxmax() if "CongestionLevel" in fdf.columns and not fdf["CongestionLevel"].dropna().empty else "N/A"
+    tcd = fdf.groupby("CongestionLevel")["Delay_Minutes"].mean().max()    if "CongestionLevel" in fdf.columns and not fdf["CongestionLevel"].dropna().empty else 0
 
-    bins = [0,5,10,20,30,50,float("inf")]; lbls = ["<5","5–10","10–20","20–30","30–50","50+"]
+    ops = [
+        f"<b>{rl}</b> — <b>{tc}</b> trips, avg delay <b>{ad:.1f} mins</b>, OTP <b>{otp:.1f}%</b>.",
+        f"Highest single-trip delay: <b>{mx:.1f} mins</b>.",
+        f"<b>{str(tc_).lower()} congestion</b> is the leading pressure — <b>{tcd:.1f} mins</b> avg."
+    ]
+
+    bins = [0, 5, 10, 20, 30, 50, float("inf")]
+    lbls = ["<5", "5–10", "10–20", "20–30", "30–50", "50+"]
     fdf["DB"] = pd.cut(fdf["Delay_Minutes"], bins=bins, labels=lbls)
-    bc  = fdf["DB"].value_counts().sort_index()
-    sev = [f"Most frequent range: <b>{bc.idxmax()} mins</b> — <b>{bc.max()}</b> trips.",
-           f"Only <b>{bc.get('50+',0)}</b> trips >50 mins.",
-           f"Medium-range delays (10–30 mins) dominate — consistent moderate congestion."]
+    bc = fdf["DB"].value_counts().sort_index()
+    sev = [
+        f"Most frequent range: <b>{bc.idxmax()} mins</b> — <b>{bc.max()}</b> trips.",
+        f"Only <b>{bc.get('50+', 0)}</b> trips >50 mins.",
+        "Medium-range delays (10–30 mins) dominate — consistent moderate congestion."
+    ]
 
     hourly = fdf.groupby("Hour")["Delay_Minutes"].mean() if "Hour" in fdf.columns else pd.Series([ad])
-    ph = int(hourly.idxmax()); sh = int(hourly.idxmin())
-    tim = [f"Peak at <b>{ph}:00</b> — <b>{hourly.max():.1f} mins</b> avg.",
-           f"Most stable at <b>{sh}:00</b> — <b>{hourly.min():.1f} mins</b> avg.",
-           f"Extra vehicles at <b>{ph-1}:00–{ph+1}:00</b> would improve punctuality most."]
+    ph = int(hourly.idxmax())
+    sh = int(hourly.idxmin())
+    tim = [
+        f"Peak at <b>{ph}:00</b> — <b>{hourly.max():.1f} mins</b> avg.",
+        f"Most stable at <b>{sh}:00</b> — <b>{hourly.min():.1f} mins</b> avg.",
+        f"Extra vehicles at <b>{ph-1}:00–{ph+1}:00</b> would improve punctuality most."
+    ]
 
-    vd = fdf.groupby("VehicleType")["Delay_Minutes"].mean(); vc = fdf["VehicleType"].value_counts()
-    veh = [f"<b>{vc.idxmax()}</b> handles most trips (<b>{vc.max()}</b>).",
-           f"<b>{vd.idxmax()}</b> highest avg delay <b>{vd.max():.1f} mins</b>; <b>{vd.idxmin()}</b> best at <b>{vd.min():.1f} mins</b>.",
-           f"Prioritise <b>{vd.idxmin()}</b> during peak congestion."]
+    vd = fdf.groupby("VehicleType")["Delay_Minutes"].mean()
+    vc = fdf["VehicleType"].value_counts()
+    veh = [
+        f"<b>{vc.idxmax()}</b> handles most trips (<b>{vc.max()}</b>).",
+        f"<b>{vd.idxmax()}</b> highest avg delay <b>{vd.max():.1f} mins</b>; <b>{vd.idxmin()}</b> best at <b>{vd.min():.1f} mins</b>.",
+        f"Prioritise <b>{vd.idxmin()}</b> during peak congestion."
+    ]
 
-    wd  = fdf.groupby("WeatherCondition")["Delay_Minutes"].mean()
-    wth = [f"<b>{wd.idxmax()}</b> weather — highest delays at <b>{wd.max():.1f} mins</b>.",
-           f"<b>{wd.idxmin()}</b> — smoothest at <b>{wd.min():.1f} mins</b>.",
-           f"<b>{wd.max()-wd.min():.1f} min gap</b> confirms weather as major risk factor."]
+    wd = fdf.groupby("WeatherCondition")["Delay_Minutes"].mean()
+    wth = [
+        f"<b>{wd.idxmax()}</b> weather — highest delays at <b>{wd.max():.1f} mins</b>.",
+        f"<b>{wd.idxmin()}</b> — smoothest at <b>{wd.min():.1f} mins</b>.",
+        f"<b>{wd.max() - wd.min():.1f} min gap</b> confirms weather as major risk factor."
+    ]
 
-    ara = df.groupby("RouteID")["Delay_Minutes"].mean(); na = ara.mean()
-    ra  = fdf["Delay_Minutes"].mean(); diff = ra - na; cr = (fdf["Status"]=="Cancelled").sum() / tc * 100
-    rte = [f"Avg delay <b>{ra:.1f} mins</b> vs network avg <b>{na:.1f} mins</b>.",
-           f"Delay is <b>{abs(diff):.1f} mins {'above' if diff>0 else 'below'}</b> network avg.",
-           f"Cancellation rate: <b>{cr:.1f}%</b> — {'significant concern.' if cr>5 else 'within acceptable limits.'}"]
+    ara  = df.groupby("RouteID")["Delay_Minutes"].mean()
+    na   = ara.mean()
+    ra   = fdf["Delay_Minutes"].mean()
+    diff = ra - na
+    cr   = (fdf["Status"] == "Cancelled").sum() / tc * 100
+    rte  = [
+        f"Avg delay <b>{ra:.1f} mins</b> vs network avg <b>{na:.1f} mins</b>.",
+        f"Delay is <b>{abs(diff):.1f} mins {'above' if diff > 0 else 'below'}</b> network avg.",
+        f"Cancellation rate: <b>{cr:.1f}%</b> — {'significant concern.' if cr > 5 else 'within acceptable limits.'}"
+    ]
 
     def dyn_box(title, pts):
         items = "".join(f"<li>{p}</li>" for p in pts)
         st.markdown(f'<div class="dyn-box"><h4>{title}</h4><ul>{items}</ul></div>', unsafe_allow_html=True)
 
-    st.header(f"📊 Key Insights — {'All Routes' if route_filter=='ALL' else f'Route {route_filter}'}")
+    st.header(f"📊 Key Insights — {'All Routes' if route_filter == 'ALL' else f'Route {route_filter}'}")
     lc, rc = st.columns(2)
     with lc:
         with st.container(border=True):
-            dyn_box("🚍 Transport Operations",   ops)
-            dyn_box("🚦 Delay Severity",         sev)
+            dyn_box("🚍 Transport Operations",    ops)
+            dyn_box("🚦 Delay Severity",          sev)
             dyn_box("⏰ Time-Based Observations", tim)
     with rc:
         with st.container(border=True):
-            dyn_box("🚆 Vehicle Performance",        veh)
-            dyn_box("🌦️ Weather and Traffic Impact", wth)
-            dyn_box("🛣️ Route Performance",          rte)
+            dyn_box("🚆 Vehicle Performance",         veh)
+            dyn_box("🌦️ Weather and Traffic Impact",  wth)
+            dyn_box("🛣️ Route Performance",           rte)
 
     st.divider()
     st.caption("Public Transport Delay Analytics Dashboard • Operational Insights Module")
 
 # ======================================================
-# PAGE: MY PROFILE + SUBSCRIPTION
+# PAGE: PAYMENTS  (NEW)
+# ======================================================
+
+def page_payments():
+    st.title("💳 Payments & Subscription")
+    st.markdown("Manage your subscription plan and view payment history.")
+    st.divider()
+
+    current_plan = get_plan()
+    fresh_users  = load_users()
+    user_data    = fresh_users.get(st.session_state.username, {})
+    transactions = user_data.get("transactions", [])
+
+    # ── Step router ──────────────────────────────────────
+    step = st.session_state.get("payment_step", "select")
+
+    # ─────────────────────────────────────────────────────
+    # STEP 1: Plan selection
+    # ─────────────────────────────────────────────────────
+    if step == "select":
+        st.subheader("📦 Choose Your Plan")
+        c1, c2, c3 = st.columns(3)
+        for col, plan_name in zip([c1, c2, c3], ["Free", "Basic", "Premium"]):
+            p          = PLANS[plan_name]
+            is_current = (plan_name == current_plan)
+            border     = f"border: 2px solid {p['color']};" if is_current else f"border: 1px solid {p['color']}40;"
+            feats      = "".join(f"<li style='padding:4px 0;font-size:13px;'>{f}</li>" for f in p["features"])
+            badge      = ("<br><span style='background:#22c55e;color:white;padding:2px 10px;"
+                          "border-radius:20px;font-size:12px;'>✓ Current Plan</span>") if is_current else ""
+
+            col.markdown(f"""
+            <div class="plan-card" style="background:{p['badge_bg']};{border}">
+                <h3 style="color:{p['badge_text']};">{plan_name}{badge}</h3>
+                <div style="color:{p['color']};font-size:20px;font-weight:700;margin-bottom:14px;">{p['price']}</div>
+                <ul style="list-style:none;padding:0;text-align:left;">{feats}</ul>
+            </div>
+            """, unsafe_allow_html=True)
+
+            if not is_current:
+                label = "Downgrade" if PLANS[plan_name]["monthly_revenue"] < PLANS[current_plan]["monthly_revenue"] else "Upgrade"
+                if col.button(f"{label} to {plan_name}", key=f"pay_select_{plan_name}"):
+                    st.session_state.payment_step        = "details" if plan_name != "Free" else "confirm"
+                    st.session_state.payment_target_plan = plan_name
+                    st.rerun()
+            else:
+                col.markdown(
+                    "<div style='text-align:center;color:#22c55e;font-weight:600;padding:8px;'>✓ Active</div>",
+                    unsafe_allow_html=True
+                )
+
+        st.divider()
+
+        # Transaction history
+        st.subheader("🧾 Transaction History")
+        if not transactions:
+            st.info("No transactions yet. Upgrade to a paid plan to see payment history here.")
+        else:
+            txn_df = pd.DataFrame(transactions)
+            txn_df = txn_df.sort_values("date", ascending=False).reset_index(drop=True)
+            for _, row in txn_df.iterrows():
+                status_color = "#22c55e" if row.get("status") == "Success" else "#ef4444"
+                st.markdown(f"""
+                <div style="background:rgba(255,255,255,0.03);border:1px solid rgba(139,92,246,0.15);
+                border-radius:10px;padding:14px 20px;margin-bottom:8px;display:flex;
+                justify-content:space-between;align-items:center;">
+                <div>
+                  <span style="color:#c4b5fd;font-weight:600;">#{row.get('txn_id','N/A')}</span>
+                  &nbsp;&nbsp;
+                  <span style="color:#a0aec0;font-size:13px;">{row.get('date','N/A')}</span>
+                </div>
+                <div>
+                  <span style="color:#e2d9f3;font-weight:600;margin-right:20px;">
+                    {row.get('plan','N/A')} Plan — ₹{row.get('amount',0):,}
+                  </span>
+                  <span style="color:{status_color};font-weight:600;">{row.get('status','N/A')}</span>
+                </div>
+                </div>
+                """, unsafe_allow_html=True)
+
+    # ─────────────────────────────────────────────────────
+    # STEP 2: Payment details (paid plans only)
+    # ─────────────────────────────────────────────────────
+    elif step == "details":
+        target  = st.session_state.payment_target_plan
+        p       = PLANS[target]
+        amount  = p["monthly_revenue"]
+
+        st.subheader(f"💳 Payment Details — {target} Plan")
+        st.markdown(f"""
+        <div class="payment-card">
+        <div style="display:flex;justify-content:space-between;margin-bottom:20px;">
+          <div>
+            <div style="color:#a0aec0;font-size:13px;">Upgrading to</div>
+            <div style="color:{p['color']};font-size:22px;font-weight:700;">{target} Plan</div>
+          </div>
+          <div style="text-align:right;">
+            <div style="color:#a0aec0;font-size:13px;">Amount</div>
+            <div style="color:#22c55e;font-size:26px;font-weight:800;">₹{amount:,}/month</div>
+          </div>
+        </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        method = st.radio(
+            "Select Payment Method",
+            ["💳 Credit / Debit Card", "🏦 UPI / Net Banking", "📱 Wallets (Paytm, PhonePe, GPay)"],
+            key="pay_method_radio"
+        )
+        st.session_state.payment_method = method
+
+        if method == "💳 Credit / Debit Card":
+            st.markdown("#### Card Details")
+            col1, col2 = st.columns([2, 1])
+            with col1:
+                card_num = st.text_input("Card Number", placeholder="1234  5678  9012  3456", max_chars=19)
+            with col2:
+                card_name = st.text_input("Cardholder Name", placeholder="Full Name")
+            col3, col4, col5 = st.columns(3)
+            with col3:
+                expiry = st.text_input("Expiry (MM/YY)", placeholder="MM/YY", max_chars=5)
+            with col4:
+                cvv = st.text_input("CVV", placeholder="•••", type="password", max_chars=3)
+            with col5:
+                st.write("")
+
+            ready = all([card_num, card_name, expiry, cvv])
+
+        elif method == "🏦 UPI / Net Banking":
+            st.markdown("#### UPI Details")
+            upi_id = st.text_input("UPI ID", placeholder="yourname@upi")
+            ready  = bool(upi_id and "@" in upi_id)
+
+        else:
+            st.markdown("#### Wallet")
+            wallet  = st.selectbox("Select Wallet", ["Paytm", "PhonePe", "Google Pay", "Amazon Pay"])
+            mobile  = st.text_input("Registered Mobile Number", placeholder="10-digit mobile number", max_chars=10)
+            ready   = bool(mobile and len(mobile) == 10 and mobile.isdigit())
+
+        st.markdown("")
+        col_back, col_pay = st.columns([1, 2])
+        with col_back:
+            if st.button("← Back"):
+                st.session_state.payment_step = "select"
+                st.rerun()
+        with col_pay:
+            if st.button(f"Pay ₹{amount:,} →", disabled=not ready):
+                st.session_state.payment_step = "confirm"
+                st.rerun()
+
+        if not ready:
+            st.caption("⚠️ Please fill in all payment details to continue.")
+
+    # ─────────────────────────────────────────────────────
+    # STEP 3: Confirm
+    # ─────────────────────────────────────────────────────
+    elif step == "confirm":
+        target = st.session_state.payment_target_plan
+        p      = PLANS[target]
+        amount = p["monthly_revenue"]
+
+        st.subheader("✅ Confirm Your Order")
+        st.markdown(f"""
+        <div class="payment-card">
+        <table style="width:100%;color:#e2d9f3;font-size:15px;line-height:2.2;">
+          <tr><td style="color:#a0aec0;">Plan</td><td style="font-weight:700;color:{p['color']}">{target}</td></tr>
+          <tr><td style="color:#a0aec0;">Billing</td><td>Monthly</td></tr>
+          <tr><td style="color:#a0aec0;">Amount</td><td style="font-weight:700;color:#22c55e;">₹{amount:,}</td></tr>
+          <tr><td style="color:#a0aec0;">Payment Method</td>
+              <td>{st.session_state.get("payment_method", "—") if amount > 0 else "Free — No payment needed"}</td></tr>
+          <tr><td style="color:#a0aec0;">Date</td><td>{datetime.now().strftime('%d %b %Y, %I:%M %p')}</td></tr>
+        </table>
+        </div>
+        """, unsafe_allow_html=True)
+
+        if amount > 0:
+            st.info("🔒 This is a demo environment. No real payment will be processed.")
+
+        col_back, col_confirm = st.columns([1, 2])
+        with col_back:
+            if st.button("← Edit"):
+                st.session_state.payment_step = "details" if amount > 0 else "select"
+                st.rerun()
+        with col_confirm:
+            btn_label = f"✅ Confirm & Activate {target} Plan"
+            if st.button(btn_label):
+                # Record transaction
+                txn = {
+                    "txn_id": generate_txn_id(),
+                    "plan":   target,
+                    "amount": amount,
+                    "method": st.session_state.get("payment_method", "Free"),
+                    "status": "Success",
+                    "date":   datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                }
+                fresh = load_users()
+                if "transactions" not in fresh[st.session_state.username]:
+                    fresh[st.session_state.username]["transactions"] = []
+                fresh[st.session_state.username]["transactions"].append(txn)
+                fresh[st.session_state.username]["plan"] = target
+                save_users(fresh)
+
+                st.session_state.plan         = target
+                st.session_state.payment_step = "success"
+                st.rerun()
+
+    # ─────────────────────────────────────────────────────
+    # STEP 4: Success
+    # ─────────────────────────────────────────────────────
+    elif step == "success":
+        target = st.session_state.payment_target_plan
+        p      = PLANS[target]
+        fresh  = load_users()
+        txns   = fresh[st.session_state.username].get("transactions", [])
+        last   = txns[-1] if txns else {}
+
+        st.markdown(f"""
+        <div class="payment-success">
+            <div style="font-size:60px;margin-bottom:10px;">🎉</div>
+            <h2 style="color:#86efac;margin-bottom:8px;">Payment Successful!</h2>
+            <p style="color:#d1fae5;font-size:16px;">
+                You are now on the <b>{target} Plan</b>.<br>
+                Your new features are active immediately.
+            </p>
+            <br>
+            <div style="background:rgba(0,0,0,0.2);border-radius:10px;padding:14px 24px;display:inline-block;text-align:left;">
+                <div style="color:#6ee7b7;font-size:13px;">Transaction ID: <b>{last.get('txn_id','N/A')}</b></div>
+                <div style="color:#6ee7b7;font-size:13px;">Amount Paid: <b>₹{last.get('amount', 0):,}</b></div>
+                <div style="color:#6ee7b7;font-size:13px;">Date: <b>{last.get('date','N/A')}</b></div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        st.markdown("")
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("🏠 Go to Home"):
+                st.session_state.payment_step = "select"
+                st.session_state.payment_target_plan = None
+                st.rerun()
+        with col2:
+            if st.button("📊 Open Dashboard"):
+                st.session_state.payment_step = "select"
+                st.session_state.payment_target_plan = None
+                st.rerun()
+
+# ======================================================
+# PAGE: MY PROFILE
 # ======================================================
 
 def page_profile():
@@ -967,60 +1384,24 @@ def page_profile():
     <div class="profile-card">
         <h3 style="margin:0 0 8px 0;">👋 {st.session_state.name}</h3>
         <p style="color:#a0aec0;margin:0;">@{st.session_state.username}</p>
-        <p style="color:#a0aec0;margin:4px 0;">Member since: {user_data.get('created_at','N/A')[:10]}</p>
+        <p style="color:#a0aec0;margin:4px 0;">Member since: {user_data.get('created_at', 'N/A')[:10]}</p>
+        <p style="color:#a0aec0;margin:4px 0;">Current Plan:
+            <b style="color:#c4b5fd;">{current_plan}</b> — {PLANS[current_plan]['price']}
+        </p>
     </div>
     """, unsafe_allow_html=True)
 
-    st.subheader("📦 Subscription Plans")
-    st.markdown("Choose the plan that fits your needs. Upgrade anytime to unlock more features.")
-    st.markdown("<br>", unsafe_allow_html=True)
-
-    c1, c2, c3 = st.columns(3)
-    for col, plan_name in zip([c1, c2, c3], ["Free","Basic","Premium"]):
-        p          = PLANS[plan_name]
-        is_current = (plan_name == current_plan)
-        border     = f"border: 2px solid {p['color']};" if is_current else f"border: 1px solid {p['color']}40;"
-        feats      = "".join(f"<li style='padding:5px 0;font-size:14px;'>{f}</li>" for f in p["features"])
-        badge      = "<br><span style='background:#22c55e;color:white;padding:2px 10px;border-radius:20px;font-size:12px;'>✓ Current Plan</span>" if is_current else ""
-
-        col.markdown(f"""
-        <div class="plan-card" style="background:{p['badge_bg']};{border}">
-            <h3 style="color:{p['badge_text']};">{plan_name}{badge}</h3>
-            <div class="price" style="color:{p['color']};font-size:18px;font-weight:700;margin-bottom:14px;">{p['price']}</div>
-            <ul style="list-style:none;padding:0;text-align:left;">{feats}</ul>
-        </div>
-        """, unsafe_allow_html=True)
-
-        if not is_current:
-            if col.button(f"Upgrade to {plan_name}", key=f"up_{plan_name}"):
-                fresh_users[st.session_state.username]["plan"] = plan_name
-                save_users(fresh_users)
-                st.session_state.plan = plan_name
-                st.success(f"✅ Upgraded to **{plan_name}** plan!")
-                st.rerun()
-        else:
-            col.markdown("<div style='text-align:center;color:#22c55e;font-weight:600;padding:8px;'>✓ Active</div>", unsafe_allow_html=True)
-
-    st.divider()
     st.subheader("📊 Feature Comparison")
     comp = pd.DataFrame({
-        "Feature":   ["Routes visible","Dashboard charts","Route Insights","Insights Page","AI queries/day","Price"],
-        "Free":      ["3","2","❌","❌","0","₹0/month"],
-        "Basic":     ["10","5","✅","❌","5","₹199/month"],
-        "Premium":   ["All","All (7)","✅","✅","Unlimited","₹499/month"],
+        "Feature":  ["Routes visible", "Dashboard charts", "Route Insights", "Insights Page", "AI queries/day", "Price"],
+        "Free":     ["3", "2", "❌", "❌", "0", "₹0/month"],
+        "Basic":    ["10", "5", "✅", "❌", "5", "₹199/month"],
+        "Premium":  ["All", "All (7)", "✅", "✅", "Unlimited", "₹499/month"],
     })
     st.dataframe(comp.set_index("Feature"), use_container_width=True)
 
     st.divider()
-    st.subheader("⚠️ Switch Plan")
-    other = [p for p in ["Free","Basic","Premium"] if p != current_plan]
-    sw    = st.selectbox("Select plan to switch to", other)
-    if st.button(f"Switch to {sw}", type="secondary"):
-        fresh_users[st.session_state.username]["plan"] = sw
-        save_users(fresh_users)
-        st.session_state.plan = sw
-        st.warning(f"Plan changed to **{sw}**.")
-        st.rerun()
+    st.markdown("To upgrade or change your plan, visit the **Payments** page from the sidebar.")
 
 # ======================================================
 # PAGE: ABOUT US
@@ -1039,7 +1420,10 @@ insights for both passengers and transport organizations.
     """)
     st.divider()
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Routes","20+"); c2.metric("Trips","20K+"); c3.metric("Avg Delay","7 mins"); c4.metric("OTP","89%")
+    c1.metric("Routes",    "20+")
+    c2.metric("Trips",     "20K+")
+    c3.metric("Avg Delay", "7 mins")
+    c4.metric("OTP",       "89%")
     st.divider()
     st.subheader("🚍 How It Helps Passengers")
     st.markdown("- Find frequently delayed routes\n- Know crowded timings\n- Get AI-generated travel insights")
@@ -1049,7 +1433,7 @@ insights for both passengers and transport organizations.
     st.divider()
 
 # ======================================================
-# ADMIN: REVENUE DASHBOARD (Subscription-based)
+# ADMIN: REVENUE DASHBOARD
 # ======================================================
 
 def page_revenue():
@@ -1063,16 +1447,15 @@ def page_revenue():
         st.info("No users have signed up yet. Revenue will appear here once users register.")
         return
 
-    # ── Summary KPIs ──
-    total_users        = len(sub_df)
-    total_monthly_rev  = sub_df["monthly_revenue"].sum()
-    paying_users       = sub_df[sub_df["monthly_revenue"] > 0]
-    free_users         = len(sub_df[sub_df["plan"] == "Free"])
-    basic_users        = len(sub_df[sub_df["plan"] == "Basic"])
-    premium_users      = len(sub_df[sub_df["plan"] == "Premium"])
-    basic_rev          = basic_users   * PLANS["Basic"]["monthly_revenue"]
-    premium_rev        = premium_users * PLANS["Premium"]["monthly_revenue"]
-    projected_annual   = total_monthly_rev * 12
+    total_users       = len(sub_df)
+    total_monthly_rev = sub_df["monthly_revenue"].sum()
+    paying_users      = sub_df[sub_df["monthly_revenue"] > 0]
+    free_users        = len(sub_df[sub_df["plan"] == "Free"])
+    basic_users       = len(sub_df[sub_df["plan"] == "Basic"])
+    premium_users     = len(sub_df[sub_df["plan"] == "Premium"])
+    basic_rev         = basic_users   * PLANS["Basic"]["monthly_revenue"]
+    premium_rev       = premium_users * PLANS["Premium"]["monthly_revenue"]
+    projected_annual  = total_monthly_rev * 12
 
     k1, k2, k3, k4 = st.columns(4)
     k1.metric("Total Users",          total_users)
@@ -1081,8 +1464,6 @@ def page_revenue():
     k4.metric("Projected Annual Rev", f"₹{projected_annual:,}")
 
     st.markdown("<br>", unsafe_allow_html=True)
-
-    # ── Plan-wise user count cards ──
     st.subheader("📦 Users per Plan")
     pc1, pc2, pc3 = st.columns(3)
     for col, pname, count, rev in zip(
@@ -1104,104 +1485,86 @@ def page_revenue():
     st.markdown("<br>", unsafe_allow_html=True)
     st.divider()
 
-    # ── Charts Row 1 ──
     col1, col2 = st.columns(2)
-
     with col1:
-        # Users by plan — pie
         plan_counts = sub_df["plan"].value_counts().reset_index()
         plan_counts.columns = ["Plan", "Users"]
-        fig1 = px.pie(
-            plan_counts, names="Plan", values="Users",
-            title="👥 User Distribution by Plan",
-            color="Plan",
-            color_discrete_map={"Free":"#4a5568","Basic":"#2b6cb0","Premium":"#6b21a8"}
-        )
+        fig1 = px.pie(plan_counts, names="Plan", values="Users",
+                      title="👥 User Distribution by Plan", color="Plan",
+                      color_discrete_map={"Free":"#4a5568","Basic":"#2b6cb0","Premium":"#6b21a8"})
         fig1.update_traces(textinfo="label+percent+value")
         fig1.update_layout(**COMMON_LAYOUT)
         st.plotly_chart(fig1, use_container_width=True)
 
     with col2:
-        # Revenue by plan — bar
         rev_data = pd.DataFrame({
-            "Plan":    ["Free", "Basic", "Premium"],
+            "Plan":    ["Free",   "Basic",    "Premium"],
             "Users":   [free_users, basic_users, premium_users],
-            "Revenue": [0, basic_rev, premium_rev]
+            "Revenue": [0,          basic_rev,   premium_rev]
         })
-        fig2 = px.bar(
-            rev_data, x="Plan", y="Revenue",
-            title="💰 Monthly Revenue by Plan",
-            color="Plan",
-            text=rev_data["Revenue"].apply(lambda x: f"₹{x:,}"),
-            color_discrete_map={"Free":"#4a5568","Basic":"#2b6cb0","Premium":"#6b21a8"}
-        )
+        fig2 = px.bar(rev_data, x="Plan", y="Revenue", title="💰 Monthly Revenue by Plan",
+                      color="Plan", text=rev_data["Revenue"].apply(lambda x: f"₹{x:,}"),
+                      color_discrete_map={"Free":"#4a5568","Basic":"#2b6cb0","Premium":"#6b21a8"})
         fig2.update_traces(textposition="outside")
         fig2.update_layout(**COMMON_LAYOUT)
         st.plotly_chart(fig2, use_container_width=True)
 
-    # ── Charts Row 2 ──
     col3, col4 = st.columns(2)
-
     with col3:
-        # Revenue share — donut
-        rev_share = pd.DataFrame({
-            "Plan":    ["Basic", "Premium"],
-            "Revenue": [basic_rev, premium_rev]
-        })
+        rev_share = pd.DataFrame({"Plan": ["Basic","Premium"], "Revenue": [basic_rev, premium_rev]})
         if rev_share["Revenue"].sum() > 0:
-            fig3 = px.pie(
-                rev_share, names="Plan", values="Revenue",
-                title="📊 Revenue Share (Paying Plans)",
-                hole=0.45,
-                color="Plan",
-                color_discrete_map={"Basic":"#2b6cb0","Premium":"#6b21a8"}
-            )
+            fig3 = px.pie(rev_share, names="Plan", values="Revenue",
+                          title="📊 Revenue Share (Paying Plans)", hole=0.45, color="Plan",
+                          color_discrete_map={"Basic":"#2b6cb0","Premium":"#6b21a8"})
             fig3.update_traces(textinfo="label+percent")
             fig3.update_layout(**COMMON_LAYOUT)
             st.plotly_chart(fig3, use_container_width=True)
         else:
-            st.info("No paying users yet — revenue share will appear once users upgrade.")
+            st.info("No paying users yet.")
 
     with col4:
-        # Revenue per user (ARPU) comparison
         arpu_data = pd.DataFrame({
-            "Plan":  ["Free","Basic","Premium"],
-            "ARPU":  [0, PLANS["Basic"]["monthly_revenue"], PLANS["Premium"]["monthly_revenue"]]
+            "Plan": ["Free","Basic","Premium"],
+            "ARPU": [0, PLANS["Basic"]["monthly_revenue"], PLANS["Premium"]["monthly_revenue"]]
         })
-        fig4 = px.bar(
-            arpu_data, x="Plan", y="ARPU",
-            title="💡 Revenue per User (ARPU) by Plan",
-            color="Plan",
-            text=arpu_data["ARPU"].apply(lambda x: f"₹{x}"),
-            color_discrete_map={"Free":"#4a5568","Basic":"#2b6cb0","Premium":"#6b21a8"}
-        )
+        fig4 = px.bar(arpu_data, x="Plan", y="ARPU", title="💡 Revenue per User (ARPU) by Plan",
+                      color="Plan", text=arpu_data["ARPU"].apply(lambda x: f"₹{x}"),
+                      color_discrete_map={"Free":"#4a5568","Basic":"#2b6cb0","Premium":"#6b21a8"})
         fig4.update_traces(textposition="outside")
         fig4.update_layout(**COMMON_LAYOUT)
         st.plotly_chart(fig4, use_container_width=True)
 
     st.divider()
-
-    # ── Upgrade potential ──
     st.subheader("🚀 Upgrade Revenue Potential")
     pot1, pot2, pot3 = st.columns(3)
     potential_if_all_basic   = total_users * PLANS["Basic"]["monthly_revenue"]
     potential_if_all_premium = total_users * PLANS["Premium"]["monthly_revenue"]
     revenue_gap              = potential_if_all_premium - total_monthly_rev
-
     pot1.metric("If all users → Basic",   f"₹{potential_if_all_basic:,}/mo")
     pot2.metric("If all users → Premium", f"₹{potential_if_all_premium:,}/mo")
     pot3.metric("Current Revenue Gap",    f"₹{revenue_gap:,}/mo")
 
     st.divider()
-
-    # ── Per-user subscription table ──
     st.subheader("👤 User Subscription Details")
 
-    display_df = sub_df[["name","username","plan","monthly_revenue","joined"]].copy()
-    display_df.columns = ["Name","Username","Plan","Monthly Revenue (₹)","Joined"]
-    display_df = display_df.sort_values("Monthly Revenue (₹)", ascending=False)
-
-    st.dataframe(display_df, use_container_width=True)
+    # Also show transaction totals per user
+    fresh = load_users()
+    rows  = []
+    for uname, udata in fresh.items():
+        if udata["role"] == "user":
+            txns       = udata.get("transactions", [])
+            total_paid = sum(t.get("amount", 0) for t in txns if t.get("status") == "Success")
+            rows.append({
+                "Name":              udata["name"],
+                "Username":          uname,
+                "Plan":              udata.get("plan", "Free"),
+                "Monthly Rev (₹)":   PLANS[udata.get("plan","Free")]["monthly_revenue"],
+                "Total Paid (₹)":    total_paid,
+                "Transactions":      len(txns),
+                "Joined":            udata.get("created_at","")[:10]
+            })
+    if rows:
+        st.dataframe(pd.DataFrame(rows).sort_values("Monthly Rev (₹)", ascending=False), use_container_width=True)
 
     st.markdown("---")
     st.caption("💰 Subscription Revenue Dashboard • Admin View")
@@ -1216,29 +1579,36 @@ def page_user_management():
     st.divider()
 
     fresh = load_users()
-
-    plan_counts = {"Free":0,"Basic":0,"Premium":0}
+    plan_counts = {"Free": 0, "Basic": 0, "Premium": 0}
     for u, d in fresh.items():
         if d["role"] == "user":
-            p = d.get("plan","Free")
+            p = d.get("plan", "Free")
             plan_counts[p] = plan_counts.get(p, 0) + 1
 
     c1, c2, c3 = st.columns(3)
-    for col, pname in zip([c1,c2,c3], ["Free","Basic","Premium"]):
+    for col, pname in zip([c1, c2, c3], ["Free", "Basic", "Premium"]):
         p = PLANS[pname]
         col.markdown(f"""
         <div style="background:{p['badge_bg']};border:1px solid {p['color']};
         border-radius:14px;padding:16px;text-align:center;">
         <div style="color:{p['badge_text']};font-size:12px;font-weight:600;">{pname}</div>
-        <div style="color:white;font-size:30px;font-weight:800;">{plan_counts.get(pname,0)}</div>
+        <div style="color:white;font-size:30px;font-weight:800;">{plan_counts.get(pname, 0)}</div>
         <div style="color:{p['badge_text']};font-size:11px;">users</div>
         </div>""", unsafe_allow_html=True)
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-    user_list = [{"Username":u,"Name":d["name"],"Role":d["role"],
-                  "Plan":d.get("plan","Free"),"Joined":d["created_at"][:10]}
-                 for u, d in fresh.items()]
+    user_list = [
+        {
+            "Username": u,
+            "Name":     d["name"],
+            "Role":     d["role"],
+            "Plan":     d.get("plan", "Free"),
+            "Transactions": len(d.get("transactions", [])),
+            "Joined":   d["created_at"][:10]
+        }
+        for u, d in fresh.items()
+    ]
     st.dataframe(pd.DataFrame(user_list), use_container_width=True)
 
 # ======================================================
@@ -1251,12 +1621,13 @@ else:
     page = render_sidebar()
 
     if st.session_state.role == "admin":
-        if   page == "Revenue Dashboard":       page_revenue()
-        elif page == "User Management":         page_user_management()
+        if   page == "Revenue Dashboard":     page_revenue()
+        elif page == "User Management":       page_user_management()
     else:
-        if   page == "Home":                    page_home()
-        elif page == "Operational Dashboard":   page_operational_dashboard()
-        elif page == "Route Insights":          page_route_insights()
-        elif page == "Insights":                page_insights()
-        elif page == "My Profile":              page_profile()
-        elif page == "About Us":                page_about()
+        if   page == "Home":                  page_home()
+        elif page == "Operational Dashboard": page_operational_dashboard()
+        elif page == "Route Insights":        page_route_insights()
+        elif page == "Insights":              page_insights()
+        elif page == "My Profile":            page_profile()
+        elif page == "Payments":              page_payments()
+        elif page == "About Us":              page_about()
