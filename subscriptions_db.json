@@ -1,0 +1,94 @@
+{
+  "minnyyy20": {
+    "plan": "pro",
+    "status": "active",
+    "started_at": "2026-06-03 17:03:56.835347",
+    "expires_at": "2026-07-03 17:03:56.835319",
+    "history": [
+      {
+        "plan": "free",
+        "changed_to": "pro",
+        "date": "2026-06-03 16:57:27",
+        "amount": 499,
+        "note": "Admin override"
+      },
+      {
+        "plan": "pro",
+        "changed_to": "free",
+        "date": "2026-06-03 17:02:26",
+        "amount": 0
+      },
+      {
+        "plan": "free",
+        "changed_to": "enterprise",
+        "date": "2026-06-03 17:02:34",
+        "amount": 999
+      },
+      {
+        "plan": "enterprise",
+        "changed_to": "pro",
+        "date": "2026-06-03 17:03:56",
+        "amount": 499
+      }
+    ]
+  },
+  "nithinnn": {
+    "plan": "enterprise",
+    "status": "active",
+    "started_at": "2026-06-03 16:57:41.558246",
+    "expires_at": "2026-07-03 16:57:41.558239",
+    "history": [
+      {
+        "plan": "free",
+        "changed_to": "enterprise",
+        "date": "2026-06-03 16:57:41",
+        "amount": 999,
+        "note": "Admin override"
+      }
+    ]
+  },
+  "sampathhh": {
+    "plan": "basic",
+    "status": "active",
+    "started_at": "2026-06-03 16:57:50.302120",
+    "expires_at": "2026-07-03 16:57:50.302113",
+    "history": [
+      {
+        "plan": "free",
+        "changed_to": "basic",
+        "date": "2026-06-03 16:57:50",
+        "amount": 199,
+        "note": "Admin override"
+      }
+    ]
+  },
+  "abhilashhh": {
+    "plan": "free",
+    "status": "active",
+    "started_at": "2026-06-03 16:58:00.204727",
+    "expires_at": null,
+    "history": [
+      {
+        "plan": "free",
+        "changed_to": "free",
+        "date": "2026-06-03 16:58:00",
+        "amount": 0,
+        "note": "Admin override"
+      }
+    ]
+  },
+  "nani@gmail.com": {
+    "plan": "basic",
+    "status": "active",
+    "started_at": "2026-06-03 17:09:59.335553",
+    "expires_at": "2026-07-03 17:09:59.335523",
+    "history": [
+      {
+        "plan": "free",
+        "changed_to": "basic",
+        "date": "2026-06-03 17:09:59",
+        "amount": 199
+      }
+    ]
+  }
+}
