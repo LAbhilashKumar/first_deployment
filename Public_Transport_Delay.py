@@ -493,6 +493,30 @@ def lock_banner(feature, upgrade_to="Basic"):
     """, unsafe_allow_html=True)
 
 # ======================================================
+# PAGE: MY PROFILE
+# ======================================================
+
+def page_profile():
+    st.title("👤 My Profile")
+    st.divider()
+
+    current_plan = get_plan()
+    fresh_users  = load_users()
+    user_data    = fresh_users.get(st.session_state.username, {})
+
+    st.markdown(f"""
+    <div class="profile-card">
+        <h3 style="margin:0 0 8px 0;">👋 {st.session_state.name}</h3>
+        <p style="color:#a0aec0;margin:0;">@{st.session_state.username}</p>
+        <p style="color:#a0aec0;margin:4px 0;">Member since: {user_data.get('created_at', 'N/A')[:10]}</p>
+        <p style="color:#a0aec0;margin:4px 0;">Current Plan:
+            <b style="color:#c4b5fd;">{current_plan}</b> — {PLANS[current_plan]['price']}
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
+    st.markdown("To upgrade or change your plan, visit the **Payments** page from the sidebar.")
+
+# ======================================================
 # PAGE: HOME
 # ======================================================
 
@@ -539,7 +563,7 @@ def page_operational_dashboard():
         trips  = pd.read_excel("data/Fact_Trips_Cleaned.xlsx")
         routes = pd.read_excel("data/Dim_Routes_Cleaned.xlsx")
     except FileNotFoundError as e:
-        st.error(f"Data file not found: {e}. Please ensure the `data/` folder contains the required Excel files.")
+        st.error(f"Data file not found: {e}.")
         return
 
     trips["Delay_Minutes"]    = pd.to_numeric(trips["Delay_Minutes"], errors="coerce")
@@ -1367,41 +1391,6 @@ def page_payments():
                 st.session_state.payment_step = "select"
                 st.session_state.payment_target_plan = None
                 st.rerun()
-
-# ======================================================
-# PAGE: MY PROFILE
-# ======================================================
-
-def page_profile():
-    st.title("👤 My Profile")
-    st.divider()
-
-    current_plan = get_plan()
-    fresh_users  = load_users()
-    user_data    = fresh_users.get(st.session_state.username, {})
-
-    st.markdown(f"""
-    <div class="profile-card">
-        <h3 style="margin:0 0 8px 0;">👋 {st.session_state.name}</h3>
-        <p style="color:#a0aec0;margin:0;">@{st.session_state.username}</p>
-        <p style="color:#a0aec0;margin:4px 0;">Member since: {user_data.get('created_at', 'N/A')[:10]}</p>
-        <p style="color:#a0aec0;margin:4px 0;">Current Plan:
-            <b style="color:#c4b5fd;">{current_plan}</b> — {PLANS[current_plan]['price']}
-        </p>
-    </div>
-    """, unsafe_allow_html=True)
-
-    st.subheader("📊 Feature Comparison")
-    comp = pd.DataFrame({
-        "Feature":  ["Routes visible", "Dashboard charts", "Route Insights", "Insights Page", "AI queries/day", "Price"],
-        "Free":     ["3", "2", "❌", "❌", "0", "₹0/month"],
-        "Basic":    ["10", "5", "✅", "❌", "5", "₹199/month"],
-        "Premium":  ["All", "All (7)", "✅", "✅", "Unlimited", "₹499/month"],
-    })
-    st.dataframe(comp.set_index("Feature"), use_container_width=True)
-
-    st.divider()
-    st.markdown("To upgrade or change your plan, visit the **Payments** page from the sidebar.")
 
 # ======================================================
 # PAGE: ABOUT US
